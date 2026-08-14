@@ -1,0 +1,5 @@
+# File Editing Rules
+
+- Always modify and create files directly using your built-in file editing tools (`save_file` / `apply_diff`).
+- Never use terminal commands (like `cat`, `echo`, `sed`, or `patch`) to write, update, or create code files.
+- Only use the terminal for running builds, tests, or starting development servers.
