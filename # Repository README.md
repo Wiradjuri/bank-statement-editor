@@ -1,4 +1,4 @@
-# Repository README
+# Bank Statement Editor
 
 ## Repository status
 

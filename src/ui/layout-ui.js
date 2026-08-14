@@ -75,6 +75,7 @@ class LayoutUI {
   deselectAll() {
     this.selectedElements.clear();
     this.activeElement = null;
+    return 0;
   }
 
   getSelectedElements() {
