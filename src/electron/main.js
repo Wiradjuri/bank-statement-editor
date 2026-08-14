@@ -5,7 +5,7 @@
 const path = require("path");
 const fs = require("fs").promises;
 const { app, BrowserWindow, ipcMain } = require("electron");
-const { parseDocument, preserveLayout, calculateFps, createFingerprint } = require("./core/layout-measures");
+const { parseDocument, preserveLayout, calculateFps, createFingerprint } = require("../core/layout-measures");
 const { PdfParser } = require("../parse/pdf-parser");
 const { DocxParser } = require("../parse/docx-parser");
 const { ImageParser } = require("../parse/image-parser");

@@ -9,9 +9,7 @@
   "scripts": {
     "dev": "tsc && electron .",
     "build": "tsc && electron-builder",
-    "test": "echo test",
-    "compile": "tsc && electron .",
-    "start": "npm run compile && electron ."
+    "test": "echo test"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
