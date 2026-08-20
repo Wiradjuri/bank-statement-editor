@@ -1,0 +1,7 @@
+Flask
+pytesseract
+opencv-python
+Pillow
+pdf2image
+openai
+numpy
