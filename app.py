@@ -1,6 +1,13 @@
+
 import os
+import time
+from functools import wraps
 import json
 import base64
+import argparse
+import sys
+from core_parser import BankParser
+from redactor import StatementRedactor
 from flask import Flask, request, render_template, send_file, jsonify
 import pytesseract
 from PIL import Image, ImageDraw, ImageFont
@@ -15,18 +22,74 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
+def main():
+    parser = argparse.ArgumentParser(description="Bank Statement Editor & Manipulator CLI")
+    
+    # Input/Output Arguments
+    parser.add_argument('--input', type=str, required=True, help='Path to the source PDF')
+    parser.add_argument('--output', type=str, help='Output filename')
+    parser.add_argument('--format', choices=['csv', 'xlsx', 'json'], default='csv', help='Export format')
+    
+    # Manipulation Arguments
+    parser.add_argument('--redact', type=str, help='Pattern or Account Number to redact')
+    parser.add_argument('--bank', choices=['chase', 'hsbc', 'barclays', 'generic'], default='generic', help='Bank template')
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        print(f"Error: File {args.input} not found.")
+        sys.exit(1)
+
+    # 1. Initialize Parser with Template Logic
+    processor = BankParser(args.input, bank_type=args.bank)
+    
+    # 2. Extract and Clean Data
+    print(f"[*] Extracting data using {args.bank} template...")
+    data = processor.get_cleaned_dataframe()
+
+    # 3. Handle Redaction if requested
+    if args.redact:
+        print(f"[*] Redacting sensitive info: {args.redact}")
+        redactor = StatementRedactor(args.input)
+        redacted_path = f"redacted_{args.input}"
+        redactor.apply(args.redact, redacted_path)
+        print(f"[+] Redacted PDF saved to {redacted_path}")
+
+    # 4. Export Data
+    output_file = args.output if args.output else f"extracted_data.{args.format}"
+    if args.format == 'csv':
+        data.to_csv(output_file, index=False)
+    elif args.format == 'xlsx':
+        data.to_excel(output_file, index=False)
+    
+    print(f"[+] Success! Data exported to {output_file}")
+
 # --- Configuration ---
 # Load environment variables from .env file
 load_dotenv()
 
+# --- Model Configuration ---
+# Override these values in .env when the provider retires or replaces a model.
+MODEL_CONFIG = {
+    "text_extraction": os.environ.get("TEXT_MODEL", "llama-3-3-70b"),
+    "vision": os.environ.get("VISION_MODEL", "gemini-3-6-flash"),
+}
+TEXT_MODEL_CHAIN = [
+    MODEL_CONFIG["text_extraction"],
+    "nvidia/llama-3.1-nemotron-70b-instruct",
+    "qwen/qwen2.5-72b-instruct",
+    MODEL_CONFIG["vision"],
+]
+TEXT_MODEL_CHAIN = list(dict.fromkeys(model for model in TEXT_MODEL_CHAIN if model))
+
 try:
     client = OpenAI(
-        api_key=os.environ.get("VENICE_API_KEY"),
-        base_url="https://api.venice.ai/api/v1"
+        api_key=os.environ.get("NVIDIA_API_KEY"),
+        base_url="https://integrate.api.nvidia.com/v1"
     )
 except Exception as e:
-    print(f"Error initializing Venice API client: {e}")
-    print("Please ensure you have set your VENICE_API_KEY in your .env file.")
+    print(f"Error initializing NVIDIA API client: {e}")
+    print("Please ensure you have set your NVIDIA_API_KEY in your .env file.")
     client = None
 
 app = Flask(__name__)
@@ -60,14 +123,79 @@ def preprocess_file(file_path, filename):
         return processed_path
 
 def encode_image(image_path):
-    """Encodes an image file to a base64 string for the Venice API."""
+    """Encodes an image file to a base64 string for the NVIDIA API."""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def identify_fields_with_ai(full_text):
-    """Uses an LLM (via Venice) to identify key-value pairs from document text."""
+def parse_json_response(content):
+    """Parse JSON returned as plain text or inside a Markdown code fence."""
+    if not content:
+        raise ValueError("Model returned an empty response.")
+
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        object_start = cleaned.find("{")
+        object_end = cleaned.rfind("}")
+        if object_start >= 0 and object_end > object_start:
+            return json.loads(cleaned[object_start:object_end + 1])
+        raise
+
+def call_llm_with_fallback(prompt, is_json=True):
+    """Call NVIDIA text models in priority order, skipping retired models."""
     if not client:
-        print("Venice client not initialized. Skipping AI field identification.")
+        return None
+
+    last_error = None
+    for model_name in TEXT_MODEL_CHAIN:
+        try:
+            request = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if is_json:
+                try:
+                    response = client.chat.completions.create(
+                        **request, response_format={"type": "json_object"}
+                    )
+                except Exception:
+                    response = client.chat.completions.create(**request)
+            else:
+                response = client.chat.completions.create(**request)
+
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("Model returned an empty response.")
+            content = content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            elif content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            return content.strip()
+        except Exception as error:
+            error_text = str(error)
+            last_error = error
+            if "410" in error_text or "404" in error_text or "Gone" in error_text:
+                print(f"[!] NVIDIA model {model_name} unavailable; trying next.")
+                continue
+            print(f"[!] NVIDIA request failed on {model_name}: {error}")
+            break
+
+    print(f"[X] All NVIDIA text models failed. Last error: {last_error}")
+    return None
+
+def identify_fields_with_ai(full_text):
+    """Uses an LLM (via NVIDIA) to identify key-value pairs from document text."""
+    if not client:
+        print("NVIDIA client not initialized. Skipping AI field identification.")
         return {}
     prompt = f"""
     You are an expert document parser. Analyze the following text from a bank statement.
@@ -86,24 +214,18 @@ def identify_fields_with_ai(full_text):
     \"\"\"
     """
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.choices[0].message.content
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        return json.loads(content)
+        content = call_llm_with_fallback(prompt)
+        if not content:
+            return {}
+        return parse_json_response(content)
     except Exception as e:
-        print(f"Error calling Venice API for field identification: {e}")
+        print(f"Error calling NVIDIA API for field identification: {e}")
         return {}
 
 def find_coordinates_with_ai(image_path, field_name):
-    """Uses an LLM with vision (via Venice) to find the coordinates of a field's value."""
+    """Uses an LLM with vision (via NVIDIA) to find the coordinates of a field's value."""
     if not client:
-        print("Venice client not initialized. Skipping AI coordinate finding.")
+        print("NVIDIA client not initialized. Skipping AI coordinate finding.")
         return None
     prompt = f"""
     Analyze the provided image. I need you to find the pixel coordinates of the VALUE for the field named "{field_name}".
@@ -112,9 +234,9 @@ def find_coordinates_with_ai(image_path, field_name):
     If you cannot find the field, return an empty JSON object {{}}.
     """
     try:
-        response = client.chat.completions.create(
-            model="gemini-3-6-flash",
-            messages=[
+        request = {
+            "model": MODEL_CONFIG["vision"],
+            "messages": [
                 {
                     "role": "user",
                     "content": [
@@ -123,11 +245,16 @@ def find_coordinates_with_ai(image_path, field_name):
                     ],
                 }
             ],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
+        }
+        try:
+            response = client.chat.completions.create(
+                **request, response_format={"type": "json_object"}
+            )
+        except Exception:
+            response = client.chat.completions.create(**request)
+        return parse_json_response(response.choices[0].message.content)
     except Exception as e:
-        print(f"Error calling Venice Vision API for coordinate finding: {e}")
+        print(f"Error calling NVIDIA Vision API for coordinate finding: {e}")
         return None
 
 def extract_transactions(full_text):
@@ -147,16 +274,10 @@ def extract_transactions(full_text):
     \"\"\"
     """
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.choices[0].message.content
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        return json.loads(content)
+        content = call_llm_with_fallback(prompt)
+        if not content:
+            return []
+        return parse_json_response(content)
     except Exception as e:
         print(f"Error extracting transactions: {e}")
         return []
@@ -181,22 +302,16 @@ def analyze_financial_health(full_text):
     \"\"\"
     """
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.choices[0].message.content
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        analysis = json.loads(content)
+        content = call_llm_with_fallback(prompt)
+        if not content:
+            raise RuntimeError("All configured NVIDIA models failed.")
+        analysis = parse_json_response(content)
         required_keys = ["total_deposits", "total_withdrawals", "net_cash_flow", "concerns", "verdict", "suggestions"]
         if not all(key in analysis for key in required_keys):
             raise ValueError("Parsed JSON is missing required keys.")
         return analysis
     except Exception as e:
-        print(f"Error calling Venice API for financial analysis: {e}")
+        print(f"Error calling NVIDIA API for financial analysis: {e}")
         return {
             "total_deposits": 0, "total_withdrawals": 0, "net_cash_flow": 0,
             "concerns": [f"Failed to analyze document: {e}"], "verdict": "WEAK",
