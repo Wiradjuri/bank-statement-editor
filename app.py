@@ -6,6 +6,7 @@ import json
 import base64
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from core_parser import BankParser
 from redactor import StatementRedactor
 from flask import Flask, request, render_template, send_file, jsonify
@@ -86,7 +87,8 @@ TEXT_MODEL_CHAIN = list(dict.fromkeys(model for model in TEXT_MODEL_CHAIN if mod
 try:
     client = OpenAI(
         api_key=os.environ.get("NVIDIA_API_KEY"),
-        base_url="https://integrate.api.nvidia.com/v1"
+        base_url="https://integrate.api.nvidia.com/v1",
+        timeout=30.0,
     )
 except Exception as e:
     print(f"Error initializing NVIDIA API client: {e}")
@@ -105,23 +107,27 @@ for folder in [app.config['UPLOAD_FOLDER'], app.config['PROCESSED_FOLDER'], app.
 # --- Helper Functions ---
 
 def preprocess_file(file_path, filename):
-    """Creates a clean, high-resolution copy of the uploaded file."""
+    """Create high-resolution page images for the complete document."""
     if filename.lower().endswith('.pdf'):
         try:
             pages = convert_from_path(file_path, 300)
-            if not pages: return None
-            first_page = pages[0]
-            processed_filename = os.path.splitext(filename)[0] + '.png'
-            processed_path = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
-            first_page.save(processed_path, 'PNG')
-            return processed_path
+            if not pages:
+                return []
+            processed_paths = []
+            stem = os.path.splitext(filename)[0]
+            for page_number, page_image in enumerate(pages):
+                processed_filename = f'{stem}_page_{page_number + 1}.png'
+                processed_path = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
+                page_image.save(processed_path, 'PNG')
+                processed_paths.append(processed_path)
+            return processed_paths
         except Exception as e:
             print(f"Error converting PDF: {e}")
-            return None
+            return []
     else:
         processed_path = os.path.join(app.config['PROCESSED_FOLDER'], filename)
         Image.open(file_path).save(processed_path)
-        return processed_path
+        return [processed_path]
 
 def encode_image(image_path):
     """Encodes an image file to a base64 string for the NVIDIA API."""
@@ -129,24 +135,34 @@ def encode_image(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 def parse_json_response(content):
-    """Parse JSON returned as plain text or inside a Markdown code fence."""
+    """Parse the first JSON value from plain, fenced, or verbose model output."""
     if not content:
         raise ValueError("Model returned an empty response.")
 
+    if not isinstance(content, str):
+        content = str(content)
     cleaned = content.strip()
     if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].strip()
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:]).strip()
 
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        object_start = cleaned.find("{")
-        object_end = cleaned.rfind("}")
-        if object_start >= 0 and object_end > object_start:
-            return json.loads(cleaned[object_start:object_end + 1])
-        raise
+    decoder = json.JSONDecoder()
+    candidates = [cleaned]
+    object_start = cleaned.find("{")
+    if object_start >= 0:
+        candidates.append(cleaned[object_start:])
+    array_start = cleaned.find("[")
+    if array_start >= 0:
+        candidates.append(cleaned[array_start:])
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            value, _ = decoder.raw_decode(candidate.lstrip())
+            return value
+        except json.JSONDecodeError as error:
+            last_error = error
+    raise ValueError(f"Model response did not contain valid JSON: {last_error}")
 
 def call_llm_with_fallback(prompt, is_json=True):
     """Call NVIDIA text models in priority order, skipping retired models."""
@@ -163,12 +179,18 @@ def call_llm_with_fallback(prompt, is_json=True):
             if is_json:
                 try:
                     response = client.chat.completions.create(
-                        **request, response_format={"type": "json_object"}
+                        **request, response_format={"type": "json_object"}, timeout=30
                     )
-                except Exception:
-                    response = client.chat.completions.create(**request)
+                except Exception as error:
+                    # Some compatible endpoints reject response_format while
+                    # still supporting the same chat request without it.
+                    if not any(token in str(error).lower() for token in (
+                        "response_format", "json_object", "unsupported", "400"
+                    )):
+                        raise
+                    response = client.chat.completions.create(**request, timeout=30)
             else:
-                response = client.chat.completions.create(**request)
+                response = client.chat.completions.create(**request, timeout=30)
 
             content = response.choices[0].message.content
             if not content:
@@ -249,14 +271,50 @@ def find_coordinates_with_ai(image_path, field_name):
         }
         try:
             response = client.chat.completions.create(
-                **request, response_format={"type": "json_object"}
+                **request, response_format={"type": "json_object"}, timeout=30
             )
         except Exception:
-            response = client.chat.completions.create(**request)
+            response = client.chat.completions.create(**request, timeout=30)
         return parse_json_response(response.choices[0].message.content)
     except Exception as e:
         print(f"Error calling NVIDIA Vision API for coordinate finding: {e}")
         return None
+
+def find_transaction_table_with_ai(image_path):
+    """Find the transaction table bounds so edited rows can be redrawn in place."""
+    if not client:
+        return None
+    prompt = """
+    Analyze this bank statement image and locate the complete transaction table,
+    including its header and all visible transaction rows. Return ONLY a JSON
+    object with numeric x, y, width, and height pixel coordinates. If there is
+    no transaction table on this page, return {}.
+    """
+    try:
+        request = {
+            "model": MODEL_CONFIG["vision"],
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/png;base64,{encode_image(image_path)}"
+                    }},
+                ],
+            }],
+        }
+        try:
+            response = client.chat.completions.create(
+                **request, response_format={"type": "json_object"}, timeout=30
+            )
+        except Exception:
+            response = client.chat.completions.create(**request, timeout=30)
+        table = parse_json_response(response.choices[0].message.content)
+        if all(key in table for key in ('x', 'y', 'width', 'height')):
+            return table
+    except Exception as e:
+        print(f"Error finding NVIDIA transaction table coordinates: {e}")
+    return None
 
 def extract_transactions(full_text):
     """Extracts the list of transactions from the document text."""
@@ -340,29 +398,102 @@ def process_image():
     if file:
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
         file.save(filepath)
-        processed_image_path = preprocess_file(filepath, file.filename)
-        if not processed_image_path:
+        processed_image_paths = preprocess_file(filepath, file.filename)
+        if not processed_image_paths:
             return "Could not process PDF file.", 500
 
-        full_text = pytesseract.image_to_string(Image.open(processed_image_path))
-        
-        extracted_data = identify_fields_with_ai(full_text)
-        transactions = extract_transactions(full_text)
-        financial_analysis = analyze_financial_health(full_text)
-        
+        print(f"[*] OCR: processing {len(processed_image_paths)} page(s)")
+        with ThreadPoolExecutor(max_workers=min(4, len(processed_image_paths))) as executor:
+            page_texts = list(executor.map(
+                lambda path: pytesseract.image_to_string(Image.open(path)),
+                processed_image_paths,
+            ))
+        full_text = "\n\n--- PAGE BREAK ---\n\n".join(page_texts)
+
+        # These calls are independent. Running them together avoids making the
+        # upload request wait for three full model round trips in sequence.
+        print("[*] AI: starting field, transaction, and analysis requests")
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            fields_future = executor.submit(identify_fields_with_ai, full_text)
+            transactions_future = executor.submit(extract_transactions, full_text)
+            analysis_future = executor.submit(analyze_financial_health, full_text)
+            extracted_data = fields_future.result()
+            transactions = transactions_future.result()
+            financial_analysis = analysis_future.result()
+        print("[*] AI: text requests complete")
+
         coords_cache = {}
         if extracted_data:
-            for field_name in extracted_data.keys():
-                coords = find_coordinates_with_ai(processed_image_path, field_name)
-                if coords and 'x' in coords:
-                    coords_cache[field_name] = coords
+            page_search_text = [text.lower() for text in page_texts]
+
+            def likely_field_pages(field_name, field_value):
+                terms = [str(field_name).lower(), str(field_value).lower()]
+                matches = [
+                    page_number
+                    for page_number, text in enumerate(page_search_text)
+                    if any(term and term in text for term in terms)
+                ]
+                return matches or list(range(len(processed_image_paths)))
+
+            coordinate_jobs = [
+                (field_name, page_number, page_path)
+                for field_name in extracted_data
+                for page_number in likely_field_pages(
+                    field_name, extracted_data[field_name]
+                )
+                for page_path in [processed_image_paths[page_number]]
+            ]
+
+            def locate_field_page(job):
+                field_name, page_number, page_path = job
+                print(f"[*] Vision: {field_name} page {page_number + 1}")
+                coords = find_coordinates_with_ai(page_path, field_name)
+                return field_name, page_number, coords
+
+            with ThreadPoolExecutor(max_workers=min(8, len(coordinate_jobs))) as executor:
+                coordinate_results = list(executor.map(locate_field_page, coordinate_jobs))
+            for field_name in extracted_data:
+                matches = [
+                    (page_number, coords)
+                    for result_field, page_number, coords in coordinate_results
+                    if result_field == field_name and coords and 'x' in coords
+                ]
+                if matches:
+                    page_number, coords = min(matches, key=lambda match: match[0])
+                    coords_cache[field_name] = {**coords, 'page': page_number}
+            print(f"[*] Vision: mapped {len(coords_cache)} field(s)")
+
+        likely_table_pages = [
+            page_number
+            for page_number, text in enumerate(page_search_text)
+            if any(term in text for term in (
+                'transaction', 'withdrawal', 'deposit', 'description', 'date'
+            ))
+        ] if extracted_data else list(range(len(processed_image_paths)))
+        likely_table_pages = likely_table_pages or list(range(len(processed_image_paths)))
+
+        def locate_table(page_info):
+            page_number, page_path = page_info
+            table = find_transaction_table_with_ai(page_path)
+            return {**table, 'page': page_number} if table else None
+
+        table_coords = None
+        with ThreadPoolExecutor(max_workers=min(4, len(processed_image_paths))) as executor:
+            for candidate in executor.map(
+                locate_table,
+                ((page_number, processed_image_paths[page_number])
+                 for page_number in likely_table_pages),
+            ):
+                if candidate and table_coords is None:
+                    table_coords = candidate
 
         return render_template('edit.html', 
                                data=extracted_data, 
                                transactions=transactions,
-                               image_filename=os.path.basename(processed_image_path), 
+                               image_filenames=[os.path.basename(path) for path in processed_image_paths],
                                source_filename=os.path.basename(file.filename),
                                coords=coords_cache,
+                               table_coords=table_coords or {},
                                analysis=financial_analysis)
 
 @app.route('/analyze_changes', methods=['POST'])
@@ -383,8 +514,12 @@ def generate_final():
     try:
         transactions_json = json.loads(request.form.get('transactions'))
         source_filename = os.path.basename(request.form.get('source_filename', ''))
-        image_filename = os.path.basename(request.form.get('image_filename', ''))
+        image_filenames = [
+            os.path.basename(name)
+            for name in json.loads(request.form.get('image_filenames', '[]'))
+        ]
         coords = json.loads(request.form.get('coords', '{}'))
+        table_coords = json.loads(request.form.get('table_coords', '{}'))
         source_path = os.path.join(app.config['UPLOAD_FOLDER'], source_filename)
         if not os.path.isfile(source_path):
             raise FileNotFoundError('The original uploaded document is no longer available.')
@@ -398,27 +533,81 @@ def generate_final():
             page = document.new_page(width=image.width * 72 / 300, height=image.height * 72 / 300)
             page.insert_image(page.rect, filename=source_path)
 
-        if document.page_count:
-            page = document[0]
-            image_path = os.path.join(app.config['PROCESSED_FOLDER'], image_filename)
-            image_width = Image.open(image_path).width
-            scale = page.rect.width / image_width
-            for field_name, field_coords in coords.items():
-                field_value = request.form.get(field_name)
-                if field_value is None or not all(key in field_coords for key in ('x', 'y', 'width', 'height')):
-                    continue
-                rect = pymupdf.Rect(
-                    field_coords['x'] * scale,
-                    field_coords['y'] * scale,
-                    (field_coords['x'] + field_coords['width']) * scale,
-                    (field_coords['y'] + field_coords['height']) * scale,
+        for field_name, field_coords in coords.items():
+            field_value = request.form.get(field_name)
+            page_number = int(field_coords.get('page', 0))
+            if (
+                field_value is None
+                or page_number < 0
+                or page_number >= document.page_count
+                or not all(key in field_coords for key in ('x', 'y', 'width', 'height'))
+            ):
+                continue
+            page = document[page_number]
+            image_path = os.path.join(app.config['PROCESSED_FOLDER'], image_filenames[page_number])
+            image = Image.open(image_path)
+            scale_x = page.rect.width / image.width
+            scale_y = page.rect.height / image.height
+            rect = pymupdf.Rect(
+                field_coords['x'] * scale_x,
+                field_coords['y'] * scale_y,
+                (field_coords['x'] + field_coords['width']) * scale_x,
+                (field_coords['y'] + field_coords['height']) * scale_y,
+            )
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+            page.apply_redactions()
+            page.insert_textbox(
+                rect, field_value, fontsize=max(6, rect.height * 0.75),
+                fontname='helv', color=(0, 0, 0), align=0
+            )
+
+        if table_coords and transactions_json and image_filenames:
+            page_number = int(table_coords.get('page', 0))
+            if 0 <= page_number < document.page_count and all(
+                key in table_coords for key in ('x', 'y', 'width', 'height')
+            ):
+                page = document[page_number]
+                image_path = os.path.join(
+                    app.config['PROCESSED_FOLDER'], image_filenames[page_number]
                 )
-                page.add_redact_annot(rect, fill=(1, 1, 1))
+                image = Image.open(image_path)
+                scale_x = page.rect.width / image.width
+                scale_y = page.rect.height / image.height
+                table_rect = pymupdf.Rect(
+                    table_coords['x'] * scale_x,
+                    table_coords['y'] * scale_y,
+                    (table_coords['x'] + table_coords['width']) * scale_x,
+                    (table_coords['y'] + table_coords['height']) * scale_y,
+                )
+                page.add_redact_annot(table_rect, fill=(1, 1, 1))
                 page.apply_redactions()
-                page.insert_textbox(
-                    rect, field_value, fontsize=max(6, rect.height * 0.75),
-                    fontname='helv', color=(0, 0, 0), align=0
-                )
+                row_height = table_rect.height / (len(transactions_json) + 1)
+                page.draw_rect(table_rect, color=(0.65, 0.65, 0.65), width=0.5)
+                for row_index, transaction in enumerate(transactions_json):
+                    y = table_rect.y0 + row_height * (row_index + 1)
+                    page.draw_line(
+                        pymupdf.Point(table_rect.x0, y),
+                        pymupdf.Point(table_rect.x1, y),
+                        color=(0.75, 0.75, 0.75), width=0.35
+                    )
+                    values = [
+                        str(transaction.get('date', '')),
+                        str(transaction.get('details', transaction.get('description', ''))),
+                        str(transaction.get('withdrawal', '') or ''),
+                        str(transaction.get('deposit', '') or ''),
+                    ]
+                    column_width = table_rect.width / len(values)
+                    for column_index, value in enumerate(values):
+                        cell = pymupdf.Rect(
+                            table_rect.x0 + column_index * column_width + 3,
+                            y + 2,
+                            table_rect.x0 + (column_index + 1) * column_width - 3,
+                            y + row_height - 2,
+                        )
+                        page.insert_textbox(
+                            cell, value, fontsize=max(5, row_height * 0.32),
+                            fontname='helv', color=(0, 0, 0), align=0
+                        )
 
         document.save(output_path, garbage=4, deflate=True)
         document.close()
@@ -428,4 +617,4 @@ def generate_final():
         return "Error generating PDF.", 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False, threaded=True)

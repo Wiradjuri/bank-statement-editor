@@ -82,6 +82,7 @@
             <h2>Edit Document Fields</h2>
             <form id="edit-form">
                 <input type="hidden" name="coords" id="coords-input" value='{{ coords | tojson }}'>
+                <input type="hidden" name="table_coords" id="table-coords-input" value='{{ table_coords | default({}) | tojson }}'>
                 <input type="hidden" name="transactions" id="transactions-input" value='{{ transactions | tojson }}'>
                 {% for key, value in data.items() %}
                 <div class="field-group">
@@ -133,8 +134,8 @@
     
     <div class="right-panel">
         <div class="canvas-container">
-            <h2>Original Document Preview</h2>
-            <canvas id="preview-canvas"></canvas>
+            <h2>Live Document Preview</h2>
+            <div id="preview-pages"></div>
             <p style="font-size: 12px; color: #666; margin-top: 10px;">
                 <em>Note: The preview shows the original document. The edited version (with corrected values) will be generated upon download.</em>
             </p>
@@ -304,30 +305,106 @@
         // Initial balance normalization on load
         recalculateRunningBalances();
         
-        // --- Initial Canvas Load ---
-        const canvas = document.getElementById('preview-canvas');
-        const ctx = canvas.getContext('2d');
-        const imageUrl = '/processed/{{ image_filename }}';
-        let img = new Image();
-        img.src = imageUrl;
-        img.onload = function() {
-            canvas.width = img.width;
-            canvas.height = img.height;
-            ctx.drawImage(img, 0, 0);
-        };
+        // --- Live, multi-page document preview ---
+        const pageImages = {{ image_filenames | tojson | safe }};
+        const coordinates = {{ coords | default({}) | tojson | safe }};
+        const tableCoordinates = {{ table_coords | default({}) | tojson | safe }};
+        const previewPages = document.getElementById('preview-pages');
+        const previewCanvases = [];
+
+        function drawLivePreview() {
+            previewCanvases.forEach(({ canvas, image }) => {
+                const context = canvas.getContext('2d');
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.drawImage(image, 0, 0);
+            });
+
+            Object.entries(coordinates).forEach(([fieldName, fieldCoords]) => {
+                const input = document.querySelector(`#edit-form input[name="${CSS.escape(fieldName)}"]`);
+                const preview = previewCanvases[fieldCoords.page || 0];
+                if (!input || !preview) return;
+
+                const scale = preview.canvas.width / preview.image.naturalWidth;
+                const x = fieldCoords.x * scale;
+                const y = fieldCoords.y * scale;
+                const width = fieldCoords.width * scale;
+                const height = fieldCoords.height * scale;
+                const context = preview.canvas.getContext('2d');
+                context.fillStyle = 'rgba(255, 255, 255, 0.94)';
+                context.fillRect(x, y, width, height);
+                context.fillStyle = '#111';
+                context.font = `${Math.max(12, height * 0.72)}px sans-serif`;
+                context.textBaseline = 'top';
+                context.fillText(input.value, x, y);
+            });
+
+            if (tableCoordinates.x !== undefined && transactions.length) {
+                const preview = previewCanvases[tableCoordinates.page || 0];
+                if (preview) {
+                    const scale = preview.canvas.width / preview.image.naturalWidth;
+                    const x = tableCoordinates.x * scale;
+                    const y = tableCoordinates.y * scale;
+                    const width = tableCoordinates.width * scale;
+                    const height = tableCoordinates.height * scale;
+                    const rowHeight = height / (transactions.length + 1);
+                    const context = preview.canvas.getContext('2d');
+                    context.fillStyle = 'rgba(255, 255, 255, 0.96)';
+                    context.fillRect(x, y, width, height);
+                    context.strokeStyle = 'rgba(120, 120, 120, 0.8)';
+                    context.strokeRect(x, y, width, height);
+                    context.font = `${Math.max(10, rowHeight * 0.32)}px sans-serif`;
+                    context.fillStyle = '#111';
+                    transactions.forEach((transaction, index) => {
+                        const rowY = y + rowHeight * (index + 1);
+                        context.beginPath();
+                        context.moveTo(x, rowY);
+                        context.lineTo(x + width, rowY);
+                        context.stroke();
+                        const values = [
+                            transaction.date || '',
+                            transaction.details || transaction.description || '',
+                            transaction.withdrawal || '',
+                            transaction.deposit || '',
+                        ];
+                        values.forEach((value, columnIndex) => {
+                            context.fillText(value, x + columnIndex * width / values.length + 3, rowY + 2);
+                        });
+                    });
+                }
+            }
+        }
+
+        pageImages.forEach((filename, pageIndex) => {
+            const image = new Image();
+            const canvas = document.createElement('canvas');
+            canvas.className = 'document-page';
+            canvas.setAttribute('aria-label', `Document page ${pageIndex + 1}`);
+            previewPages.appendChild(canvas);
+            previewCanvases[pageIndex] = { canvas, image };
+            image.onload = function () {
+                canvas.width = image.naturalWidth;
+                canvas.height = image.naturalHeight;
+                drawLivePreview();
+            };
+            image.src = `/processed/${encodeURIComponent(filename)}`;
+        });
+
+        document.getElementById('edit-form').addEventListener('input', drawLivePreview);
 
         // --- Final Download Logic ---
         async function downloadEditedPDF() {
             // Gather all data
             const formData = new FormData();
             const transactionsJson = JSON.stringify(transactions);
-            const coordsJson = JSON.stringify({{ coords | tojson | safe }});
+            const coordsJson = JSON.stringify(coordinates);
             document.getElementById('transactions-input').value = transactionsJson;
             document.getElementById('coords-input').value = coordsJson;
+            document.getElementById('table-coords-input').value = JSON.stringify(tableCoordinates);
             formData.append('transactions', transactionsJson);
-            formData.append('image_filename', '{{ image_filename }}');
+            formData.append('image_filenames', JSON.stringify(pageImages));
             formData.append('source_filename', '{{ source_filename }}');
             formData.append('coords', coordsJson);
+            formData.append('table_coords', JSON.stringify(tableCoordinates));
 
             const changedFields = [];
             

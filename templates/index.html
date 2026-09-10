@@ -36,7 +36,7 @@
         .statement-grid { display:grid; grid-template-columns:1fr 1fr; gap:17px 12px; margin-bottom:28px; }
         .statement-balance { padding:13px; color:#e9f0e9; background:var(--green); margin-bottom:25px; } .statement-balance .mini-value { font-size:20px; }
         .row { display:grid; grid-template-columns:64px 1fr 68px; gap:8px; padding:9px 0; border-bottom:1px solid var(--line); font-size:9px; } .row span:last-child { text-align:right; } .row.muted { color:var(--muted); }
-        .loading-state { display:none; margin-top:15px; } .loading-state.active { display:block; } .progress-track { height:8px; overflow:hidden; background:#e5e1d8; } .progress-bar { width:35%; height:100%; background:var(--accent); animation:loading 1.4s ease-in-out infinite; } .loading-message { margin:9px 0 0; color:var(--muted); font-size:10px; text-align:center; }
+        .loading-state { display:none; margin-top:15px; } .loading-state.active { display:block; } .progress-meta { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:7px; color:var(--muted); font-size:10px; } .progress-percent { color:var(--ink); font-size:13px; font-weight:500; } .progress-track { height:8px; overflow:hidden; background:#e5e1d8; } .progress-bar { width:0; height:100%; background:var(--accent); transition:width .25s ease; } .loading-message { margin:9px 0 0; color:var(--muted); font-size:10px; text-align:center; }
         .how { display:grid; grid-template-columns:.8fr 1.2fr; gap:60px; border-top:1px solid var(--line); padding-top:35px; } .how h2 { margin:0; font:400 38px/1 'DM Serif Display',serif; }
         .steps { display:grid; grid-template-columns:repeat(3,1fr); gap:25px; } .step { border-top:2px solid var(--ink); padding-top:13px; } .step-number { color:var(--accent); font-size:11px; } .step h3 { margin:20px 0 9px; font-size:12px; font-weight:500; } .step p { font-size:11px; line-height:1.7; margin:0; }
         .privacy { display:flex; justify-content:space-between; gap:30px; margin-top:60px; padding:18px 0; border-top:1px solid var(--line); font-size:10px; } .privacy strong { color:var(--green); font-weight:500; }
@@ -54,7 +54,7 @@
                 <p class="hero-copy">Ledgerline turns a scanned bank statement into a clear, editable workspace. <strong>Extract the details, correct the numbers, and download a clean revised document</strong> without rebuilding the page by hand.</p>
                 <form id="upload-form" action="/process" method="post" enctype="multipart/form-data">
                     <div class="upload-card"><label class="upload-label" for="statement-file">Start with a statement</label><input id="statement-file" type="file" name="file" accept=".pdf,image/*" required><button id="upload-button" type="submit">Upload and Analyze</button>
-                        <div id="loading-state" class="loading-state" aria-live="polite" aria-hidden="true"><div class="progress-track" role="progressbar" aria-label="Analyzing document" aria-valuetext="Analysis in progress"><div class="progress-bar"></div></div><p class="loading-message">Uploading, reading, and mapping your document...</p></div>
+                        <div id="loading-state" class="loading-state" aria-live="polite" aria-hidden="true"><div class="progress-meta"><span id="progress-stage">Preparing upload</span><span id="progress-percent" class="progress-percent">0%</span></div><div class="progress-track" role="progressbar" aria-label="Analyzing document" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar" class="progress-bar"></div></div><p id="loading-message" class="loading-message">Uploading, reading, and mapping your document...</p></div>
                         <div class="upload-foot"><span>PDF or image</span><span>OCR + assisted extraction</span></div>
                     </div>
                 </form>
@@ -64,6 +64,75 @@
         <section class="how"><h2>From scan<br>to sorted.</h2><div class="steps"><article class="step"><div class="step-number">01 / READ</div><h3>Drop in the document</h3><p>Upload a PDF or image. OCR reads the page and identifies the fields and transaction table.</p></article><article class="step"><div class="step-number">02 / REFINE</div><h3>Work in one view</h3><p>Correct account details and transactions in a focused editor. Running balances update as you type.</p></article><article class="step"><div class="step-number">03 / EXPORT</div><h3>Take the clean copy</h3><p>Download a revised PDF with your corrections placed back onto the original document layout.</p></article></div></section>
         <footer class="privacy"><span><strong>Local-first workflow.</strong> Files are processed by this app and kept in its local working folders.</span><span>Built for clarity when the details matter.</span></footer>
     </main>
-    <script>document.getElementById('upload-form').addEventListener('submit', function () { const button=document.getElementById('upload-button'); const loadingState=document.getElementById('loading-state'); button.disabled=true; button.textContent='Analyzing...'; loadingState.classList.add('active'); loadingState.setAttribute('aria-hidden','false'); });</script>
+    <script>
+        const uploadForm = document.getElementById('upload-form');
+        const uploadButton = document.getElementById('upload-button');
+        const loadingState = document.getElementById('loading-state');
+        const progressBar = document.getElementById('progress-bar');
+        const progressTrack = loadingState.querySelector('[role="progressbar"]');
+        const progressPercent = document.getElementById('progress-percent');
+        const progressStage = document.getElementById('progress-stage');
+        const loadingMessage = document.getElementById('loading-message');
+        let processingTimer;
+
+        function setProgress(value, stage, message) {
+            const percentage = Math.max(0, Math.min(100, Math.round(value)));
+            progressBar.style.width = `${percentage}%`;
+            progressPercent.textContent = `${percentage}%`;
+            progressStage.textContent = stage;
+            loadingMessage.textContent = message;
+            progressTrack.setAttribute('aria-valuenow', percentage);
+            progressTrack.setAttribute('aria-valuetext', `${percentage}% complete: ${stage}`);
+        }
+
+        uploadForm.addEventListener('submit', function (event) {
+            event.preventDefault();
+            uploadButton.disabled = true;
+            uploadButton.textContent = 'Analyzing...';
+            loadingState.classList.add('active');
+            loadingState.setAttribute('aria-hidden', 'false');
+            setProgress(0, 'Uploading', 'Sending your document...');
+
+            const request = new XMLHttpRequest();
+            request.open('POST', uploadForm.action, true);
+            request.upload.addEventListener('progress', function (progressEvent) {
+                if (progressEvent.lengthComputable) {
+                    setProgress(progressEvent.loaded / progressEvent.total * 35, 'Uploading', 'Sending your document...');
+                }
+            });
+            request.upload.addEventListener('load', function () {
+                setProgress(38, 'Reading', 'OCR is reading every page...');
+                let current = 38;
+                processingTimer = window.setInterval(function () {
+                    current = Math.min(current + 1, 92);
+                    const stage = current < 62 ? 'Reading' : current < 82 ? 'Extracting' : 'Mapping';
+                    const message = current < 62 ? 'OCR is reading every page...' : current < 82 ? 'Extracting fields and transactions...' : 'Placing edits on the document...';
+                    setProgress(current, stage, message);
+                }, 700);
+            });
+            request.addEventListener('load', function () {
+                window.clearInterval(processingTimer);
+                if (request.status >= 200 && request.status < 300) {
+                    setProgress(100, 'Complete', 'Opening the editor...');
+                    window.setTimeout(function () {
+                        document.open();
+                        document.write(request.responseText);
+                        document.close();
+                    }, 250);
+                } else {
+                    uploadButton.disabled = false;
+                    uploadButton.textContent = 'Upload and Analyze';
+                    setProgress(0, 'Error', 'The document could not be processed. Try again.');
+                }
+            });
+            request.addEventListener('error', function () {
+                window.clearInterval(processingTimer);
+                uploadButton.disabled = false;
+                uploadButton.textContent = 'Upload and Analyze';
+                setProgress(0, 'Error', 'Connection failed. Check the server and try again.');
+            });
+            request.send(new FormData(uploadForm));
+        });
+    </script>
 </body>
 </html>
