@@ -2,24 +2,68 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AI Document Editor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ledgerline | Bank Statement Editor</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em; background-color: #f9f9f9; }
-        .container { max-width: 600px; margin: auto; background: white; padding: 2em; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
-        input[type="file"] { width: 100%; padding: 10px; margin: 1em 0; border: 1px solid #ccc; border-radius: 4px; }
-        button { width: 100%; padding: 12px; background-color: #007bff; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; }
-        button:hover { background-color: #0056b3; }
+        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Serif+Display&display=swap');
+        :root { --paper:#f4f0e8; --light:#fbfaf6; --ink:#20231f; --muted:#6d7069; --line:#d9d4ca; --accent:#e34d35; --green:#557466; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; color:var(--ink); background:var(--paper); font-family:'DM Mono',monospace; }
+        body::before { content:''; position:fixed; inset:0; pointer-events:none; opacity:.25; background-image:radial-gradient(#8a867e .55px,transparent .55px); background-size:7px 7px; mask-image:linear-gradient(#000,transparent 80%); }
+        .shell { position:relative; max-width:1240px; margin:auto; padding:28px 5vw 58px; }
+        nav { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:18px; }
+        .brand { display:flex; align-items:center; gap:10px; font-size:13px; letter-spacing:.08em; text-transform:uppercase; font-weight:500; }
+        .brand-mark { width:25px; height:25px; display:grid; place-items:center; color:var(--light); background:var(--ink); font:18px 'DM Serif Display',serif; transform:rotate(-7deg); }
+        .nav-note,.upload-foot,.step p,.privacy,.hero-copy { color:var(--muted); }
+        .nav-note { font-size:11px; letter-spacing:.05em; }
+        .hero { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr); gap:clamp(44px,8vw,112px); align-items:center; padding:clamp(58px,10vh,110px) 0 78px; }
+        .eyebrow { color:#b93625; font-size:11px; letter-spacing:.14em; text-transform:uppercase; margin:0 0 22px; }
+        h1 { max-width:720px; margin:0; font:400 clamp(52px,7vw,94px)/.92 'DM Serif Display',serif; letter-spacing:-.025em; }
+        .hero-copy { max-width:540px; margin:28px 0 34px; font-size:14px; line-height:1.8; }
+        .hero-copy strong { color:var(--ink); font-weight:500; }
+        .upload-card { padding:25px; background:var(--light); border:1px solid var(--ink); box-shadow:10px 10px 0 var(--ink); }
+        .upload-label { display:block; color:var(--muted); font-size:11px; letter-spacing:.1em; text-transform:uppercase; margin-bottom:13px; }
+        input[type=file] { width:100%; padding:16px 10px; margin:0 0 15px; border:1px dashed #aaa59b; background:#f6f3ed; color:var(--muted); font:12px 'DM Mono',monospace; cursor:pointer; }
+        button { width:100%; padding:15px; border:0; color:#fffaf3; background:var(--accent); font:500 12px 'DM Mono',monospace; letter-spacing:.05em; text-transform:uppercase; cursor:pointer; transition:.2s; }
+        button:hover { background:#b93625; transform:translateY(-2px); } button:disabled { background:#777a73; cursor:wait; transform:none; }
+        .upload-foot { display:flex; justify-content:space-between; gap:12px; font-size:10px; line-height:1.5; margin-top:15px; }
+        .statement-wrap { position:relative; min-height:430px; }
+        .statement { position:absolute; width:min(100%,390px); right:3%; top:0; padding:28px 25px 25px; background:var(--light); border:1px solid #c9c3b8; box-shadow:18px 18px 0 rgba(32,35,31,.12); transform:rotate(3.5deg); animation:settle .8s ease both; }
+        .statement::before { content:'EDITABLE'; position:absolute; right:-28px; top:80px; color:var(--accent); font-size:10px; letter-spacing:.16em; transform:rotate(90deg); }
+        .statement-head { display:flex; justify-content:space-between; border-bottom:2px solid var(--ink); padding-bottom:15px; margin-bottom:19px; }
+        .statement-title { font:26px 'DM Serif Display',serif; } .statement-code { color:var(--muted); font-size:9px; text-align:right; line-height:1.6; }
+        .mini-label { color:var(--muted); font-size:8px; text-transform:uppercase; letter-spacing:.1em; } .mini-value { margin-top:5px; font-size:12px; }
+        .statement-grid { display:grid; grid-template-columns:1fr 1fr; gap:17px 12px; margin-bottom:28px; }
+        .statement-balance { padding:13px; color:#e9f0e9; background:var(--green); margin-bottom:25px; } .statement-balance .mini-value { font-size:20px; }
+        .row { display:grid; grid-template-columns:64px 1fr 68px; gap:8px; padding:9px 0; border-bottom:1px solid var(--line); font-size:9px; } .row span:last-child { text-align:right; } .row.muted { color:var(--muted); }
+        .loading-state { display:none; margin-top:15px; } .loading-state.active { display:block; } .progress-track { height:8px; overflow:hidden; background:#e5e1d8; } .progress-bar { width:35%; height:100%; background:var(--accent); animation:loading 1.4s ease-in-out infinite; } .loading-message { margin:9px 0 0; color:var(--muted); font-size:10px; text-align:center; }
+        .how { display:grid; grid-template-columns:.8fr 1.2fr; gap:60px; border-top:1px solid var(--line); padding-top:35px; } .how h2 { margin:0; font:400 38px/1 'DM Serif Display',serif; }
+        .steps { display:grid; grid-template-columns:repeat(3,1fr); gap:25px; } .step { border-top:2px solid var(--ink); padding-top:13px; } .step-number { color:var(--accent); font-size:11px; } .step h3 { margin:20px 0 9px; font-size:12px; font-weight:500; } .step p { font-size:11px; line-height:1.7; margin:0; }
+        .privacy { display:flex; justify-content:space-between; gap:30px; margin-top:60px; padding:18px 0; border-top:1px solid var(--line); font-size:10px; } .privacy strong { color:var(--green); font-weight:500; }
+        @keyframes loading { 0%{transform:translateX(-130%)} 100%{transform:translateX(310%)} } @keyframes settle { from{opacity:0;transform:translateY(16px) rotate(1deg)} to{opacity:1;transform:rotate(3.5deg)} }
+        @media (max-width:780px) { .shell{padding:20px 22px 45px} .nav-note{display:none} .hero{grid-template-columns:1fr;padding:60px 0 75px} h1{font-size:clamp(54px,16vw,76px)} .statement-wrap{min-height:390px;order:-1} .statement{right:8%;width:min(88%,370px)} .how{grid-template-columns:1fr;gap:30px} .steps{grid-template-columns:1fr;gap:28px} .privacy{align-items:flex-start;flex-direction:column;gap:10px} }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>AI-Powered Document Editor</h1>
-        <p>Upload a payslip or statement (Image or PDF) to begin. The AI will automatically find the editable fields.</p>
-        <form action="/process" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".pdf,image/*" required>
-            <button type="submit">Upload and Analyze</button>
-        </form>
-    </div>
+    <main class="shell">
+        <nav><div class="brand"><span class="brand-mark">L</span> Ledgerline</div><div class="nav-note">Bank statement editing studio / v1.0</div></nav>
+        <section class="hero">
+            <div>
+                <p class="eyebrow">Make the paperwork make sense</p>
+                <h1>Your statement,<br>made workable.</h1>
+                <p class="hero-copy">Ledgerline turns a scanned bank statement into a clear, editable workspace. <strong>Extract the details, correct the numbers, and download a clean revised document</strong> without rebuilding the page by hand.</p>
+                <form id="upload-form" action="/process" method="post" enctype="multipart/form-data">
+                    <div class="upload-card"><label class="upload-label" for="statement-file">Start with a statement</label><input id="statement-file" type="file" name="file" accept=".pdf,image/*" required><button id="upload-button" type="submit">Upload and Analyze</button>
+                        <div id="loading-state" class="loading-state" aria-live="polite" aria-hidden="true"><div class="progress-track" role="progressbar" aria-label="Analyzing document" aria-valuetext="Analysis in progress"><div class="progress-bar"></div></div><p class="loading-message">Uploading, reading, and mapping your document...</p></div>
+                        <div class="upload-foot"><span>PDF or image</span><span>OCR + assisted extraction</span></div>
+                    </div>
+                </form>
+            </div>
+            <div class="statement-wrap" aria-label="Illustration of an editable bank statement"><div class="statement"><div class="statement-head"><div class="statement-title">Statement</div><div class="statement-code">JUL 2026<br>01 / 04</div></div><div class="statement-grid"><div><div class="mini-label">Account name</div><div class="mini-value">A. Customer</div></div><div><div class="mini-label">Account number</div><div class="mini-value">•••• 4821</div></div><div><div class="mini-label">Statement period</div><div class="mini-value">01 Jul — 31 Jul</div></div><div><div class="mini-label">Branch</div><div class="mini-value">032 — Central</div></div></div><div class="statement-balance"><div class="mini-label">Closing balance</div><div class="mini-value">$12,480.75</div></div><div class="row muted"><span>DATE</span><span>DESCRIPTION</span><span>AMOUNT</span></div><div class="row"><span>03 JUL</span><span>Salary credit</span><span>+$4,200</span></div><div class="row"><span>05 JUL</span><span>Direct debit</span><span>−$148.20</span></div><div class="row"><span>08 JUL</span><span>Card purchase</span><span>−$62.40</span></div><div class="row"><span>12 JUL</span><span>Transfer received</span><span>+$840</span></div></div></div>
+        </section>
+        <section class="how"><h2>From scan<br>to sorted.</h2><div class="steps"><article class="step"><div class="step-number">01 / READ</div><h3>Drop in the document</h3><p>Upload a PDF or image. OCR reads the page and identifies the fields and transaction table.</p></article><article class="step"><div class="step-number">02 / REFINE</div><h3>Work in one view</h3><p>Correct account details and transactions in a focused editor. Running balances update as you type.</p></article><article class="step"><div class="step-number">03 / EXPORT</div><h3>Take the clean copy</h3><p>Download a revised PDF with your corrections placed back onto the original document layout.</p></article></div></section>
+        <footer class="privacy"><span><strong>Local-first workflow.</strong> Files are processed by this app and kept in its local working folders.</span><span>Built for clarity when the details matter.</span></footer>
+    </main>
+    <script>document.getElementById('upload-form').addEventListener('submit', function () { const button=document.getElementById('upload-button'); const loadingState=document.getElementById('loading-state'); button.disabled=true; button.textContent='Analyzing...'; loadingState.classList.add('active'); loadingState.setAttribute('aria-hidden','false'); });</script>
 </body>
 </html>

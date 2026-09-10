@@ -13,6 +13,7 @@ import pytesseract
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import numpy as np
+import pymupdf
 from pdf2image import convert_from_path
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -360,6 +361,7 @@ def process_image():
                                data=extracted_data, 
                                transactions=transactions,
                                image_filename=os.path.basename(processed_image_path), 
+                               source_filename=os.path.basename(file.filename),
                                coords=coords_cache,
                                analysis=financial_analysis)
 
@@ -380,40 +382,47 @@ def analyze_changes():
 def generate_final():
     try:
         transactions_json = json.loads(request.form.get('transactions'))
-        account_name = request.form.get('Account Name', 'Unknown')
-        account_number = request.form.get('Account Number', 'Unknown')
-        balance = request.form.get('Balance as of 21 Jul 2026', 'Unknown')
-        
-        filename = 'edited_statement.pdf'
-        c = SimpleDocTemplate(filename, pagesize=letter)
-        elements = []
-        styles = getSampleStyleSheet()
-        
-        elements.append(Paragraph("Transaction Report", styles['Heading1']))
-        elements.append(Paragraph(f"ANZ BUSINESS ESSENTIALS", styles['Heading2']))
-        elements.append(Spacer(1, 20))
-        elements.append(Paragraph(f"Account Name: {account_name}", styles['Normal']))
-        elements.append(Paragraph(f"Account Number: {account_number}", styles['Normal']))
-        elements.append(Paragraph(f"Balance as of 21 Jul 2026: {balance}", styles['Normal']))
-        elements.append(Spacer(1, 30))
-        
-        data = [["Date", "Transaction Details", "Withdrawals", "Deposits"]]
-        for t in transactions_json:
-            withdrawal = f"${t['withdrawal']:.2f}" if t['withdrawal'] else ""
-            deposit = f"${t['deposit']:.2f}" if t['deposit'] else ""
-            data.append([t['date'], t['details'], withdrawal, deposit])
-        
-        table = Table(data)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey), ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'), ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12), ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-        ]))
-        elements.append(table)
-        c.build(elements)
-        
-        return send_file(filename, as_attachment=True)
+        source_filename = os.path.basename(request.form.get('source_filename', ''))
+        image_filename = os.path.basename(request.form.get('image_filename', ''))
+        coords = json.loads(request.form.get('coords', '{}'))
+        source_path = os.path.join(app.config['UPLOAD_FOLDER'], source_filename)
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError('The original uploaded document is no longer available.')
+
+        output_path = os.path.join(app.config['OUTPUT_FOLDER'], 'edited_statement.pdf')
+        if source_filename.lower().endswith('.pdf'):
+            document = pymupdf.open(source_path)
+        else:
+            document = pymupdf.open()
+            image = pymupdf.Pixmap(source_path)
+            page = document.new_page(width=image.width * 72 / 300, height=image.height * 72 / 300)
+            page.insert_image(page.rect, filename=source_path)
+
+        if document.page_count:
+            page = document[0]
+            image_path = os.path.join(app.config['PROCESSED_FOLDER'], image_filename)
+            image_width = Image.open(image_path).width
+            scale = page.rect.width / image_width
+            for field_name, field_coords in coords.items():
+                field_value = request.form.get(field_name)
+                if field_value is None or not all(key in field_coords for key in ('x', 'y', 'width', 'height')):
+                    continue
+                rect = pymupdf.Rect(
+                    field_coords['x'] * scale,
+                    field_coords['y'] * scale,
+                    (field_coords['x'] + field_coords['width']) * scale,
+                    (field_coords['y'] + field_coords['height']) * scale,
+                )
+                page.add_redact_annot(rect, fill=(1, 1, 1))
+                page.apply_redactions()
+                page.insert_textbox(
+                    rect, field_value, fontsize=max(6, rect.height * 0.75),
+                    fontname='helv', color=(0, 0, 0), align=0
+                )
+
+        document.save(output_path, garbage=4, deflate=True)
+        document.close()
+        return send_file(output_path, as_attachment=True, download_name='edited_statement.pdf')
     except Exception as e:
         print(f"Error generating final PDF: {e}")
         return "Error generating PDF.", 500

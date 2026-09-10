@@ -81,6 +81,8 @@
         <div class="section">
             <h2>Edit Document Fields</h2>
             <form id="edit-form">
+                <input type="hidden" name="coords" id="coords-input" value='{{ coords | tojson }}'>
+                <input type="hidden" name="transactions" id="transactions-input" value='{{ transactions | tojson }}'>
                 {% for key, value in data.items() %}
                 <div class="field-group">
                     <label for="{{ key }}">{{ key }}:</label>
@@ -136,6 +138,9 @@
             <p style="font-size: 12px; color: #666; margin-top: 10px;">
                 <em>Note: The preview shows the original document. The edited version (with corrected values) will be generated upon download.</em>
             </p>
+            <button type="button" class="btn" onclick="downloadEditedPDF()">
+                Download Edited PDF
+            </button>
         </div>
     </div>
 
@@ -315,8 +320,14 @@
         async function downloadEditedPDF() {
             // Gather all data
             const formData = new FormData();
-            formData.append('transactions', JSON.stringify(transactions));
+            const transactionsJson = JSON.stringify(transactions);
+            const coordsJson = JSON.stringify({{ coords | tojson | safe }});
+            document.getElementById('transactions-input').value = transactionsJson;
+            document.getElementById('coords-input').value = coordsJson;
+            formData.append('transactions', transactionsJson);
             formData.append('image_filename', '{{ image_filename }}');
+            formData.append('source_filename', '{{ source_filename }}');
+            formData.append('coords', coordsJson);
 
             const changedFields = [];
             
