@@ -9,11 +9,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from core_parser import BankParser
 from redactor import StatementRedactor
-from flask import Flask, request, render_template, send_file, jsonify
-import pytesseract
+from flask import Flask, request, render_template, send_file, jsonify # pyright: ignore[reportMissingImports]
+import pytesseract  # pyright: ignore[reportMissingImports]
 from PIL import Image, ImageDraw, ImageFont
-import cv2
-import numpy as np
+import cv2 # type: ignore
+import numpy as np  # pyright: ignore[reportMissingImports]
 import pymupdf
 from pdf2image import convert_from_path
 from openai import OpenAI
