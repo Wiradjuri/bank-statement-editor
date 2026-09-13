@@ -14,15 +14,15 @@ import pytesseract  # pyright: ignore[reportMissingImports]
 from PIL import Image, ImageDraw, ImageFont
 import cv2 # type: ignore
 import numpy as np  # pyright: ignore[reportMissingImports]
-import pymupdf
-from pdf2image import convert_from_path
+import fitz as pymupdf  # pyright: ignore[reportMissingImports]
+from pdf2image import convert_from_path  # pyright: ignore[reportMissingImports]
 from openai import OpenAI
-from dotenv import load_dotenv
+from dotenv import load_dotenv # type: ignore
 from reportlab.lib.pagesizes import letter  # pyright: ignore[reportMissingModuleSource]
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfgen import canvas  # pyright: ignore[reportMissingModuleSource]
+from reportlab.lib import colors # pyright: ignore[reportMissingModuleSource]
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer # pyright: ignore[reportMissingModuleSource]
+from reportlab.lib.styles import getSampleStyleSheet # pyright: ignore[reportMissingModuleSource]
 
 def main():
     parser = argparse.ArgumentParser(description="Bank Statement Editor & Manipulator CLI")
@@ -75,6 +75,7 @@ load_dotenv()
 MODEL_CONFIG = {
     "text_extraction": os.environ.get("TEXT_MODEL", "llama-3-3-70b"),
     "vision": os.environ.get("VISION_MODEL", "gemini-3-6-flash"),
+    "pdf_generation": os.environ.get("PDF_MODEL", "reportlab"),
 }
 TEXT_MODEL_CHAIN = [
     MODEL_CONFIG["text_extraction"],
@@ -214,6 +215,8 @@ def call_llm_with_fallback(prompt, is_json=True):
 
     print(f"[X] All NVIDIA text models failed. Last error: {last_error}")
     return None
+
+    
 
 def identify_fields_with_ai(full_text):
     """Uses an LLM (via NVIDIA) to identify key-value pairs from document text."""
